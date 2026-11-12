@@ -85,12 +85,14 @@ pub enum Key {
     UpdateAvailableFmt,
     UpdateOpen,
     UpdateFailedFmt,
-    HintCenterTaskbar,
     HintWidgetsButton,
     HiddenItems,
     LoginFoundStatus,
     SettingsPageTitle,
     SettingsGeneral,
+    SettingsPlacement,
+    PlacementLeft,
+    PlacementRight,
     SettingsHardware,
     SettingsLimits,
     SwitchOn,
@@ -98,16 +100,14 @@ pub enum Key {
     KeepAliveRow,
     KeepAliveSubClaude,
     KeepAliveSubCodex,
-    HwIntervalRange,
-    LimitsIntervalRange,
     SettingsLabel,
     SettingsLabelSub,
     SettingsLabelSubAccount,
     SettingsTitle,
     SettingsProviders,
     SettingsItems,
-    SettingsHwInterval,
-    SettingsLimitsInterval,
+    SettingsRefresh,
+    SettingsRefreshSub,
     SettingsWeekSuffix,
     NotifyNearLimit,
     ShowRemaining,
@@ -116,6 +116,8 @@ pub enum Key {
     NotifyTitle,
     NotifyPlacementTitle,
     NotifyPlacementBody,
+    NotifyMovedRight,
+    NotifyMovedLeft,
     NotifyFiveHour,
     KeepAlivePromptBody,
     KeepAliveRenewedFmt,
@@ -185,12 +187,14 @@ impl Key {
         Key::UpdateAvailableFmt,
         Key::UpdateOpen,
         Key::UpdateFailedFmt,
-        Key::HintCenterTaskbar,
         Key::HintWidgetsButton,
         Key::HiddenItems,
         Key::LoginFoundStatus,
         Key::SettingsPageTitle,
         Key::SettingsGeneral,
+        Key::SettingsPlacement,
+        Key::PlacementLeft,
+        Key::PlacementRight,
         Key::SettingsHardware,
         Key::SettingsLimits,
         Key::SwitchOn,
@@ -198,16 +202,14 @@ impl Key {
         Key::KeepAliveRow,
         Key::KeepAliveSubClaude,
         Key::KeepAliveSubCodex,
-        Key::HwIntervalRange,
-        Key::LimitsIntervalRange,
         Key::SettingsLabel,
         Key::SettingsLabelSub,
         Key::SettingsLabelSubAccount,
         Key::SettingsTitle,
         Key::SettingsProviders,
         Key::SettingsItems,
-        Key::SettingsHwInterval,
-        Key::SettingsLimitsInterval,
+        Key::SettingsRefresh,
+        Key::SettingsRefreshSub,
         Key::SettingsWeekSuffix,
         Key::NotifyNearLimit,
         Key::ShowRemaining,
@@ -216,6 +218,8 @@ impl Key {
         Key::NotifyTitle,
         Key::NotifyPlacementTitle,
         Key::NotifyPlacementBody,
+        Key::NotifyMovedRight,
+        Key::NotifyMovedLeft,
         Key::NotifyFiveHour,
         Key::KeepAlivePromptBody,
         Key::KeepAliveRenewedFmt,
@@ -360,11 +364,6 @@ fn strings(key: Key) -> [&'static str; Lang::ALL.len()] {
             "Não foi possível verificar atualizações ({})",
             "No se pudo comprobar si hay actualizaciones ({})",
         ],
-        Key::HintCenterTaskbar => [
-            "Center the taskbar icons for the strip to fit (Settings → Personalization → Taskbar → Taskbar behaviors)",
-            "Centralize os ícones da barra para a faixa caber (Configurações → Personalização → Barra de tarefas → Comportamentos)",
-            "Centra los iconos de la barra de tareas para que la franja quepa (Configuración → Personalización → Barra de tareas → Comportamientos de la barra de tareas)",
-        ],
         Key::HintWidgetsButton => [
             "Turn off the Windows Widgets button to free this corner (Settings → Personalization → Taskbar → Widgets)",
             "Desative o botão de Widgets do Windows para liberar este canto (Configurações → Personalização → Barra de tarefas → Widgets)",
@@ -378,6 +377,13 @@ fn strings(key: Key) -> [&'static str; Lang::ALL.len()] {
         Key::LoginFoundStatus => ["Login found", "Login encontrado", "Sesión encontrada"],
         Key::SettingsPageTitle => ["Settings", "Configurações", "Configuración"],
         Key::SettingsGeneral => ["General", "Geral", "General"],
+        Key::SettingsPlacement => [
+            "Strip position",
+            "Posição da faixa",
+            "Posición de la franja",
+        ],
+        Key::PlacementLeft => ["Left", "Esquerda", "Izquierda"],
+        Key::PlacementRight => ["Right", "Direita", "Derecha"],
         Key::SettingsHardware => ["Hardware", "Hardware", "Hardware"],
         Key::SettingsLimits => ["Limits", "Limites", "Límites"],
         Key::SwitchOn => ["On", "Ativado", "Activado"],
@@ -396,12 +402,6 @@ fn strings(key: Key) -> [&'static str; Lang::ALL.len()] {
             "Experimental · runs `codex login status` when the login expires",
             "Experimental · roda `codex login status` quando o login expira",
             "Experimental · ejecuta `codex login status` cuando la sesión caduca",
-        ],
-        Key::HwIntervalRange => ["1 to 5 seconds", "1 a 5 segundos", "De 1 a 5 segundos"],
-        Key::LimitsIntervalRange => [
-            "60 to 3600 seconds",
-            "60 a 3600 segundos",
-            "De 60 a 3600 segundos",
         ],
         Key::SettingsLabel => ["Label", "Rótulo", "Etiqueta"],
         Key::SettingsLabelSub => [
@@ -425,15 +425,15 @@ fn strings(key: Key) -> [&'static str; Lang::ALL.len()] {
             "Itens na faixa",
             "Elementos en la franja",
         ],
-        Key::SettingsHwInterval => [
-            "Hardware refresh",
-            "Atualização do hardware",
-            "Actualización del hardware",
+        Key::SettingsRefresh => [
+            "Refresh (seconds)",
+            "Atualização (segundos)",
+            "Actualización (segundos)",
         ],
-        Key::SettingsLimitsInterval => [
-            "Limits refresh",
-            "Atualização dos limites",
-            "Actualización de los límites",
+        Key::SettingsRefreshSub => [
+            "Hardware 1–5 · Limits 60–3600",
+            "Hardware 1–5 · Limites 60–3600",
+            "Hardware 1–5 · Límites 60–3600",
         ],
         Key::SettingsWeekSuffix => ["weekly", "semanal", "semanal"],
         Key::ShowRemaining => [
@@ -463,9 +463,19 @@ fn strings(key: Key) -> [&'static str; Lang::ALL.len()] {
             "CCT — Barra de tareas",
         ],
         Key::NotifyPlacementBody => [
-            "CCT could not fit on the taskbar: there is not enough free space next to the system tray. Close some windows or open Settings to choose fewer items.",
-            "O CCT não coube na barra de tarefas: não há espaço livre suficiente ao lado da bandeja do sistema. Feche algumas janelas ou abra as Configurações para escolher menos itens.",
-            "CCT no cabe en la barra de tareas: no hay suficiente espacio libre junto a la bandeja del sistema. Cierra algunas ventanas o abre Configuración para elegir menos elementos.",
+            "CCT could not fit on the taskbar: there is no room in the left corner or next to the system tray. Close some windows or open Settings to choose fewer items.",
+            "O CCT não coube na barra de tarefas: não há espaço no canto esquerdo nem ao lado da bandeja do sistema. Feche algumas janelas ou abra as Configurações para escolher menos itens.",
+            "CCT no cabe en la barra de tareas: no hay espacio en la esquina izquierda ni junto a la bandeja del sistema. Cierra algunas ventanas o abre Configuración para elegir menos elementos.",
+        ],
+        Key::NotifyMovedRight => [
+            "CCT moved next to the system tray: there is no room in the left corner of the taskbar.",
+            "O CCT foi para o lado da bandeja do sistema: não há espaço no canto esquerdo da barra de tarefas.",
+            "CCT se movió junto a la bandeja del sistema: no hay espacio en la esquina izquierda de la barra de tareas.",
+        ],
+        Key::NotifyMovedLeft => [
+            "CCT moved to the left corner of the taskbar: there is no room next to the system tray.",
+            "O CCT foi para o canto esquerdo da barra de tarefas: não há espaço ao lado da bandeja do sistema.",
+            "CCT se movió a la esquina izquierda de la barra de tareas: no hay espacio junto a la bandeja del sistema.",
         ],
         Key::NotifyFiveHour => ["5h", "5h", "5h"],
         Key::KeepAlivePromptBody => [
@@ -658,6 +668,46 @@ mod tests {
         assert_eq!(lang_from_langid(0x0816), Lang::PtBr); // pt-PT
         assert_eq!(lang_from_langid(0x0409), Lang::En);
         assert_eq!(lang_from_langid(0x0407), Lang::En); // de-DE falls back to English
+    }
+
+    #[test]
+    fn the_refresh_row_reads_well_in_every_language() {
+        let row = |lang| {
+            [
+                Key::SettingsRefresh,
+                Key::SettingsRefreshSub,
+                Key::SettingsHardware,
+                Key::SettingsLimits,
+            ]
+            .map(|key| t(lang, key))
+        };
+        assert_eq!(
+            row(Lang::En),
+            [
+                "Refresh (seconds)",
+                "Hardware 1–5 · Limits 60–3600",
+                "Hardware",
+                "Limits"
+            ]
+        );
+        assert_eq!(
+            row(Lang::PtBr),
+            [
+                "Atualização (segundos)",
+                "Hardware 1–5 · Limites 60–3600",
+                "Hardware",
+                "Limites"
+            ]
+        );
+        assert_eq!(
+            row(Lang::Es),
+            [
+                "Actualización (segundos)",
+                "Hardware 1–5 · Límites 60–3600",
+                "Hardware",
+                "Límites"
+            ]
+        );
     }
 
     #[test]
