@@ -9,6 +9,7 @@ use crate::limits::{
 };
 use crate::model::{ItemId, Kind};
 use crate::timeutil::{format_local_day_hhmm, format_local_hhmm};
+use crate::ui::taskbar::Side;
 use std::fmt::Write;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +37,8 @@ pub struct TaskbarHints {
     pub left_aligned: bool,
     pub widgets_button_on: bool,
     pub windows_10: bool,
+    /// Where the strip sits; next to the tray it needs no setup hints.
+    pub side: Side,
 }
 
 impl ItemView {
@@ -414,10 +417,13 @@ pub fn tooltip_text(
 }
 
 /// Taskbar settings the user should change for the strip to show up well.
-/// Windows 10 has no centered taskbar and no Widgets button, so it gets its own note.
+/// Windows 10 has no centered taskbar and no Widgets button, so it gets no hints.
 pub fn setup_hints(hints: TaskbarHints) -> Vec<Key> {
+    if hints.side == Side::Right {
+        return Vec::new();
+    }
     if hints.windows_10 {
-        return vec![Key::HintWindows10];
+        return Vec::new();
     }
     [
         (hints.left_aligned, Key::HintCenterTaskbar),
@@ -1031,6 +1037,19 @@ mod hint_tests {
     use crate::i18n::Key;
 
     #[test]
+    fn right_side_has_no_setup_hints() {
+        assert_eq!(
+            setup_hints(TaskbarHints {
+                left_aligned: true,
+                windows_10: true,
+                widgets_button_on: true,
+                side: Side::Right,
+            }),
+            Vec::<Key>::new()
+        );
+    }
+
+    #[test]
     fn hints_follow_taskbar_state() {
         assert_eq!(setup_hints(TaskbarHints::default()), Vec::<Key>::new());
         assert_eq!(
@@ -1054,8 +1073,8 @@ mod hint_tests {
                 windows_10: true,
                 ..Default::default()
             }),
-            [Key::HintWindows10],
-            "Windows 10 gets a note instead of the centering and Widgets hints"
+            Vec::<Key>::new(),
+            "Windows 10 gets no centering or Widgets hints"
         );
         assert_eq!(
             setup_hints(TaskbarHints {
@@ -1063,7 +1082,7 @@ mod hint_tests {
                 widgets_button_on: true,
                 ..Default::default()
             }),
-            [Key::HintWindows10],
+            Vec::<Key>::new(),
             "Windows 10 has no Widgets button to turn off"
         );
     }

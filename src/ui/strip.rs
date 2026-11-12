@@ -13,16 +13,17 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DBLCLKS, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetCursorPos,
-    GetMessageW, HWND_TOPMOST, IDC_ARROW, IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON2,
+    DeregisterShellHookWindow, DestroyMenu, DestroyWindow, DispatchMessageW,
+    EVENT_SYSTEM_FOREGROUND, GetCursorPos, GetMessageW, HSHELL_WINDOWCREATED,
+    HSHELL_WINDOWDESTROYED, HWND_TOPMOST, IDC_ARROW, IDYES, KillTimer, LoadCursorW, MB_DEFBUTTON2,
     MB_ICONQUESTION, MB_SETFOREGROUND, MB_YESNO, MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG,
     MessageBoxW, PBT_APMRESUMEAUTOMATIC, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SendMessageW, SetForegroundWindow, SetMenuDefaultItem, SetTimer, SetWindowPos, ShowWindow,
-    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WINEVENT_OUTOFCONTEXT, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDBLCLK,
-    WM_NOTIFY, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    RegisterShellHookWindow, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SendMessageW, SetForegroundWindow, SetMenuDefaultItem, SetTimer,
+    SetWindowPos, ShowWindow, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_LBUTTONDBLCLK, WM_NOTIFY, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -36,7 +37,18 @@ const TIMER_TOPMOST: usize = 2;
 const TIMER_DISKS: usize = 3;
 /// One-shot: refresh limits right after a known reset.
 const TIMER_RESET: usize = 4;
+/// One-shot: read the app buttons' edge once more after they may have moved (#10).
+const TIMER_APPS_REREAD: usize = 5;
 const TOPMOST_MS: u32 = 2000;
+const STRIP_TIMERS: [usize; 5] = [
+    TIMER_HW,
+    TIMER_TOPMOST,
+    TIMER_DISKS,
+    TIMER_RESET,
+    TIMER_APPS_REREAD,
+];
+/// Explorer adds and animates a button shortly after its window appears or activates.
+const APPS_REREAD_MS: u32 = 1000;
 const DISKS_MS: u32 = 30_000;
 
 use super::menu::{
@@ -52,6 +64,14 @@ thread_local! {
 
 static STRIP: AtomicIsize = AtomicIsize::new(0);
 static TASKBAR_CREATED: AtomicIsize = AtomicIsize::new(0);
+/// The shell hook message (`RegisterShellHookWindow`): app windows created and destroyed,
+/// including ones launched in the background, which never take the foreground.
+static SHELL_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+/// Whether a shell hook event can add or remove a taskbar button.
+fn shell_event_moves_apps(code: usize) -> bool {
+    code == HSHELL_WINDOWCREATED as usize || code == HSHELL_WINDOWDESTROYED as usize
+}
 
 /// Runs `f` on the app unless it is already borrowed (re-entrant message during a modal loop).
 pub fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
@@ -125,11 +145,68 @@ fn reassert_topmost(hwnd: HWND) {
 }
 
 fn render(hwnd: HWND) {
-    let Some(need_icons) = with_app(|app| app.needs_icons()) else {
+    let Some((need_icons, need_apps, placement)) =
+        with_app(|app| (app.needs_icons(), app.needs_apps_edge(), app.cfg.placement))
+    else {
         return;
     };
-    let info = super::taskbar::query(need_icons);
-    with_app(|app| app.render(hwnd, info, need_icons));
+    let info = super::taskbar::query(need_icons, need_apps, placement);
+    with_app(|app| app.render(hwnd, info, need_icons, need_apps));
+}
+
+/// What to do with the pending placement notice right now.
+#[derive(Debug, PartialEq, Eq)]
+enum NoticeStep {
+    /// Nothing pending, or it cannot be delivered yet: it stays pending.
+    Wait,
+    Balloon,
+    /// The startup decision: the balloon and Settings, where fewer items can be chosen.
+    BalloonAndSettings,
+}
+
+/// `pending` is the watch's pending notice (`Some(true)` opens Settings); `can_deliver`
+/// says the menu is closed, CCT is not closing, the shell accepts notifications and no
+/// fullscreen app covers the taskbar's monitor.
+fn notice_step(pending: Option<bool>, can_deliver: bool) -> NoticeStep {
+    match pending {
+        Some(_) if !can_deliver => NoticeStep::Wait,
+        Some(true) => NoticeStep::BalloonAndSettings,
+        Some(false) => NoticeStep::Balloon,
+        None => NoticeStep::Wait,
+    }
+}
+
+/// Tells the user once per run that the strip cannot sit next to the tray (#10), only while
+/// the failure is still settled. A runtime failure shows the balloon alone; clicking it opens
+/// Settings.
+fn deliver_placement_notice(hwnd: HWND) {
+    let pending = with_app(|app| app.pending_placement_notice()).flatten();
+    let can_deliver =
+        pending.is_some() && may_raise() && notifications::placement_deliverable(hwnd);
+    let step = notice_step(pending, can_deliver);
+    if step == NoticeStep::Wait {
+        return;
+    }
+    with_app(|app| app.placement_notice_sent());
+    notifications::send_placement(hwnd);
+    if step == NoticeStep::BalloonAndSettings {
+        super::settings::open(hwnd);
+    }
+}
+
+/// Asks for fresh taskbar lookups: the icons, the app buttons (without back-off) and their
+/// UI Automation container, which can be stale after Explorer or the display changed.
+fn invalidate_lookups(app: &mut App) {
+    app.invalidate_icons();
+    app.reset_apps_edge();
+    super::taskbar::invalidate_edges();
+}
+
+/// Reads the app buttons' edge once more in a second: Explorer adds and animates a button
+/// after its window appears or activates. Re-arming replaces the pending timer.
+fn schedule_apps_reread(hwnd: HWND) {
+    // SAFETY: the timer belongs to this window.
+    unsafe { SetTimer(Some(hwnd), TIMER_APPS_REREAD, APPS_REREAD_MS, None) };
 }
 
 fn set_hw_timer(hwnd: HWND, secs: u32) {
@@ -264,6 +341,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         return result;
     }
     let taskbar_created = TASKBAR_CREATED.load(Ordering::Relaxed) as u32;
+    let shell_hook = SHELL_HOOK.load(Ordering::Relaxed) as u32;
     match msg {
         WM_TIMER => {
             match wparam.0 {
@@ -285,20 +363,33 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     with_app(|app| app.control.wake());
                 }
+                TIMER_APPS_REREAD => {
+                    // SAFETY: the timer belongs to this window.
+                    unsafe {
+                        let _ = KillTimer(Some(hwnd), TIMER_APPS_REREAD);
+                    }
+                    with_app(|app| app.invalidate_apps_edge());
+                }
                 _ => {}
             }
             render(hwnd);
+            if wparam.0 == TIMER_HW {
+                deliver_placement_notice(hwnd);
+            }
             LRESULT(0)
         }
         WM_APP_LIMITS => {
             notifications::drain(hwnd);
             arm_reset_timer(hwnd);
             render(hwnd);
+            deliver_placement_notice(hwnd);
             LRESULT(0)
         }
         WM_APP_REASSERT => {
             // Foreground changes coincide with apps opening/closing, which shifts the icons.
+            // Only the cheap dirty mark: the UI Automation container stays cached.
             with_app(|app| app.invalidate_icons());
+            schedule_apps_reread(hwnd);
             render(hwnd);
             LRESULT(0)
         }
@@ -320,17 +411,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
             with_app(|app| {
-                app.invalidate_icons();
+                invalidate_lookups(app);
                 app.invalidate_frame();
             });
+            schedule_apps_reread(hwnd);
             render(hwnd);
             LRESULT(0)
         }
         WM_SETTINGCHANGE => {
             with_app(|app| {
                 app.theme_changed();
-                app.invalidate_icons();
+                invalidate_lookups(app);
             });
+            schedule_apps_reread(hwnd);
             render(hwnd);
             LRESULT(0)
         }
@@ -369,11 +462,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         }
         WM_DESTROY => {
             with_app(|app| app.control.stop());
-            // SAFETY: timers belong to this window.
+            // SAFETY: timers and the shell hook registration belong to this window.
             unsafe {
-                for id in [TIMER_HW, TIMER_TOPMOST, TIMER_DISKS, TIMER_RESET] {
+                for id in STRIP_TIMERS {
                     let _ = KillTimer(Some(hwnd), id);
                 }
+                let _ = DeregisterShellHookWindow(hwnd);
                 PostQuitMessage(0);
             }
             LRESULT(0)
@@ -381,10 +475,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         _ if taskbar_created != 0 && msg == taskbar_created => {
             notifications::cancel(hwnd);
             with_app(|app| {
-                app.invalidate_icons();
+                invalidate_lookups(app);
                 app.invalidate_frame();
+                app.restart_placement();
             });
+            schedule_apps_reread(hwnd);
             render(hwnd);
+            LRESULT(0)
+        }
+        _ if shell_hook != 0 && msg == shell_hook => {
+            // Background launches never take the foreground: re-read the app edge only.
+            if shell_event_moves_apps(wparam.0) {
+                with_app(|app| app.invalidate_apps_edge());
+                schedule_apps_reread(hwnd);
+                render(hwnd);
+            }
             LRESULT(0)
         }
         // SAFETY: default handling for everything else.
@@ -508,6 +613,12 @@ pub fn run(app: App) -> i32 {
             RegisterWindowMessageW(w!("TaskbarCreated")) as isize,
             Ordering::Relaxed,
         );
+        if RegisterShellHookWindow(hwnd).as_bool() {
+            SHELL_HOOK.store(
+                RegisterWindowMessageW(w!("SHELLHOOK")) as isize,
+                Ordering::Relaxed,
+            );
+        }
         let hw_secs = app.cfg.hw_interval_secs;
         let control = app.control.clone();
         APP.with(|cell| *cell.borrow_mut() = Some(app));
@@ -528,10 +639,13 @@ pub fn run(app: App) -> i32 {
         let inbox = spawn_worker(hwnd, control);
         with_app(|app| app.set_inbox(inbox));
         render(hwnd);
-        // A left-aligned taskbar leaves no room, so the strip stays hidden: explain why.
-        if with_app(|app| app.taskbar_hints().left_aligned) == Some(true) {
+        // Left side: left-aligned icons leave no room, so the strip stays hidden: explain why.
+        // Right side: Settings opens with the placement notice once a startup failure
+        // settles (after the grace period, from the hardware timer).
+        if with_app(|app| app.left_side_blocked()) == Some(true) {
             super::settings::open(hwnd);
         }
+        deliver_placement_notice(hwnd);
         // One-time opt-in invitation; the app is not borrowed while the modal box runs.
         if let Some((body, kinds)) = with_app(|app| app.keepalive_prompt()).flatten() {
             let body = wide_z(&body);
@@ -575,6 +689,44 @@ mod tests {
         ];
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    }
+
+    #[test]
+    fn strip_timers_never_share_an_id() {
+        let unique: std::collections::BTreeSet<_> = STRIP_TIMERS.iter().collect();
+        assert_eq!(unique.len(), STRIP_TIMERS.len(), "{STRIP_TIMERS:?}");
+        // Balloon cleanup timers use their own range.
+        for id in STRIP_TIMERS {
+            assert_eq!(
+                crate::ui::notifications::shell::timer_icon(id),
+                None,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_window_creation_and_destruction_move_the_apps() {
+        assert!(shell_event_moves_apps(HSHELL_WINDOWCREATED as usize));
+        assert!(shell_event_moves_apps(HSHELL_WINDOWDESTROYED as usize));
+        // HSHELL_WINDOWACTIVATED, HSHELL_REDRAW, HSHELL_RUDEAPPACTIVATED: the foreground hook
+        // already covers activation.
+        for code in [4, 6, 0x8004] {
+            assert!(!shell_event_moves_apps(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn placement_notice_waits_until_it_can_be_delivered() {
+        assert_eq!(notice_step(None, true), NoticeStep::Wait);
+        assert_eq!(notice_step(None, false), NoticeStep::Wait);
+        assert_eq!(notice_step(Some(true), false), NoticeStep::Wait);
+        assert_eq!(notice_step(Some(false), false), NoticeStep::Wait);
+        assert_eq!(
+            notice_step(Some(true), true),
+            NoticeStep::BalloonAndSettings
+        );
+        assert_eq!(notice_step(Some(false), true), NoticeStep::Balloon);
     }
 
     #[test]

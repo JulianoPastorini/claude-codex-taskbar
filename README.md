@@ -72,6 +72,7 @@ Each entry shows the plan and the usage last seen on that account. `⚠ login ex
 
 - **Claude Code limits**: 5-hour and weekly usage; hover for Opus/Sonnet weekly percentages, local reset times and an extra-usage notice.
 - **Codex limits**: 5-hour and weekly usage of the current `codex` login, with an offline fallback to the Codex CLI.
+- **Pace tick**: a thin mark on each Claude and Codex bar shows the time already passed in the 5-hour or weekly window; it moves left to right and reaches the end of the bar at the reset. Fill behind the tick: the quota lasts until the reset. Fill past it: you are using it faster than the clock.
 - **Claude account switcher**: save paid logins, see which one is active, switch in three clicks.
 - **Account labels**: a short tag of your choice (default `P`) before the Claude and Codex gauges; each saved Claude account keeps its own, so the strip shows it after a switch. Edit it in Settings.
 - **Hardware**: CPU, RAM, GPU (busiest engine, like Task Manager) and per-disk active time.
@@ -91,7 +92,7 @@ Each entry shows the plan and the usage last seen on that account. `⚠ login ex
 
 **Requirements:** Windows 11 or Windows 10 (x64), and a logged-in [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or Codex CLI on the same Windows user.
 
-Turn off the Windows Widgets button (*Settings → Personalization → Taskbar → Widgets*) and keep taskbar icons centered: the strip lives in that left corner.
+On Windows 11 with centered icons, turn off the Windows Widgets button (*Settings → Personalization → Taskbar → Widgets*) to free the left corner, where the strip lives. On Windows 10, and on Windows 11 with left-aligned icons, the strip sits next to the system tray and follows it as tray icons come and go. On any Windows you can force that spot with `"placement": "right"` in `%APPDATA%\claude-codex-taskbar\config.json` (`auto` is the default; `left` and `right` are the other values). If there is no room next to the tray, the strip stays hidden, Windows shows one notification per run (clicking it opens Settings), and at startup Settings also opens by itself. When space runs out, hardware items are dropped first (disks, GPU, RAM, CPU), then usage limits from the end; labels always stay and a "…" marks where items were dropped. The tooltip lists what is hidden.
 
 Releases are not code-signed yet, so SmartScreen may warn: **More info → Run anyway**. Verify the file against `SHA256SUMS.txt` or its signed build provenance:
 
@@ -116,7 +117,6 @@ Build from source: `cargo build --release` (see [CONTRIBUTING.md](CONTRIBUTING.m
 
 - **Codex account switcher**, with the same rules: paid plans, manual only, encrypted locally.
 - Active account name in the tooltip, for Claude and Codex.
-- Windows 10 placement next to the system tray ([#10](https://github.com/chiarorosa/claude-codex-taskbar/issues/10)).
 - **macOS** menu-bar version: coming soon.
 - **Linux**: not yet.
 
@@ -134,7 +134,7 @@ Look at the label before the Claude gauges (for example `P` or `W`, set in Setti
 CCT only automates what you would do by hand with `/logout` and `/login`, for accounts that are yours, and only when you click. It never switches automatically or rotates accounts to get around limits. Make sure your use follows each provider's terms.
 
 ### How do I see my Claude Code and Codex usage limits on Windows?
-The strip shows the % used of the 5-hour and weekly windows (the same numbers as `/usage` in Claude Code and `/status` in Codex), refreshed every 2 minutes. Hover for reset times.
+The strip shows the % used of the 5-hour and weekly windows (the same numbers as `/usage` in Claude Code and `/status` in Codex), refreshed every 2 minutes. Hover for reset times. A thin tick on each bar marks how much of the window has passed and reaches the end of the bar at the reset: fill behind the tick means the quota lasts until the reset, fill past it means you are ahead of the clock.
 
 ### Does it need an API key or my password?
 No. It reuses the login the official `claude` and `codex` CLIs already saved on your PC.
@@ -148,7 +148,7 @@ Under 16 MB of memory and near-zero CPU, with no disk or network activity betwee
 ![Task Manager row for claude-codex-taskbar: 0% CPU, 14.5 MB memory](docs/screenshot-pc-usage.png)
 
 ### Does it work on macOS, Linux or Windows 10?
-CCT started on Windows 11, where no tool like it existed. A macOS version is coming soon; Linux is not supported yet. On Windows 10 it runs, but the strip stays hidden for now ([#10](https://github.com/chiarorosa/claude-codex-taskbar/issues/10)).
+CCT started on Windows 11, where no tool like it existed. A macOS version is coming soon; Linux is not supported yet. On Windows 10 the strip sits next to the system tray ([#10](https://github.com/chiarorosa/claude-codex-taskbar/issues/10)).
 
 ## Disclaimer
 

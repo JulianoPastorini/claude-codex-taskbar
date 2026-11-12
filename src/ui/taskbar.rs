@@ -1,5 +1,6 @@
 //! Taskbar geometry and environment: where the free left corner is and when to hide.
 
+use crate::config::Placement;
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -17,6 +18,10 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::{ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
 use windows::core::{BSTR, HSTRING, w};
+
+mod edges;
+
+pub use edges::invalidate_edges;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rect {
@@ -62,6 +67,26 @@ pub struct TaskbarInfo {
     pub widgets_button_on: bool,
     /// Left edge of the Start button, i.e. where the taskbar icons begin.
     pub icons_left: Option<i32>,
+    /// Right edge of the taskbar icons (screen px); `None` when unknown.
+    pub apps_right: Option<i32>,
+    /// Left edge of the system tray (screen px); `None` when unknown.
+    pub tray_left: Option<i32>,
+    /// Which end of the taskbar the strip sits at; edges are read only for [`Side::Right`].
+    pub side: Side,
+}
+
+/// Free width between the taskbar icons and the system tray, minus a margin on each side.
+/// Zero when either edge is unknown or the gap is crowded.
+pub fn right_gap_width(info: &TaskbarInfo, margin: i32) -> i32 {
+    match (info.apps_right, info.tray_left) {
+        (Some(apps_right), Some(tray_left)) => (tray_left - apps_right - 2 * margin).max(0),
+        _ => 0,
+    }
+}
+
+/// Left edge of a strip of `strip_width` that ends one margin before the tray.
+pub fn right_strip_left(tray_left: i32, margin: i32, strip_width: i32) -> i32 {
+    tray_left - margin - strip_width
 }
 
 /// Half-width assumed for the centered icon group when UI Automation is unavailable
@@ -96,13 +121,14 @@ pub struct IconCache {
 pub const ICON_PERIOD_TICKS: u32 = 5;
 const ICON_MAX_BACKOFF_TICKS: u32 = 30;
 
-impl IconCache {
-    fn period(&self) -> u32 {
-        (ICON_PERIOD_TICKS << self.failures.min(4)).min(ICON_MAX_BACKOFF_TICKS)
-    }
+/// Ticks between lookups after `failures` failed ones in a row: 5, 10, 20, then 30.
+fn backoff(failures: u32) -> u32 {
+    (ICON_PERIOD_TICKS << failures.min(4)).min(ICON_MAX_BACKOFF_TICKS)
+}
 
+impl IconCache {
     pub fn needs_lookup(&self) -> bool {
-        !self.tried || (self.dirty && self.failures == 0) || self.ticks >= self.period()
+        !self.tried || (self.dirty && self.failures == 0) || self.ticks >= backoff(self.failures)
     }
 
     pub fn on_lookup(&mut self, result: Option<i32>) {
@@ -124,6 +150,57 @@ impl IconCache {
 
     pub fn invalidate(&mut self) {
         self.dirty = true;
+    }
+
+    pub fn value(&self) -> Option<i32> {
+        self.last
+    }
+}
+
+/// Caches the right edge of the app buttons for the right placement (#10). Even warm, the
+/// UI Automation read costs about 2.7 ms, so a successful read is reused for
+/// [`ICON_PERIOD_TICKS`] ticks or until invalidated (apps open and close). A failed read is
+/// never kept as a guess: the value is dropped (the strip stays hidden) and reads back off
+/// like the icons' ([`IconCache`]), ignoring the cheap dirty mark until one succeeds.
+#[derive(Debug, Default)]
+pub struct AppsEdgeCache {
+    last: Option<i32>,
+    ticks: u32,
+    failures: u32,
+    dirty: bool,
+    tried: bool,
+}
+
+impl AppsEdgeCache {
+    pub fn needs_lookup(&self) -> bool {
+        !self.tried || (self.dirty && self.failures == 0) || self.ticks >= backoff(self.failures)
+    }
+
+    pub fn on_lookup(&mut self, result: Option<i32>) {
+        self.tried = true;
+        self.last = result;
+        self.ticks = 0;
+        self.dirty = false;
+        self.failures = match result {
+            Some(_) => 0,
+            None => self.failures.saturating_add(1),
+        };
+    }
+
+    pub fn tick(&mut self) {
+        self.ticks = self.ticks.saturating_add(1);
+    }
+
+    /// Cheap mark (e.g. a foreground change): read again soon, unless reads are failing.
+    pub fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    /// The taskbar itself changed (Explorer, display or settings): read on the next render
+    /// and forget the back-off.
+    pub fn reset(&mut self) {
+        self.dirty = true;
+        self.failures = 0;
     }
 
     pub fn value(&self) -> Option<i32> {
@@ -164,6 +241,25 @@ pub fn is_windows_10(build: Option<u32>) -> bool {
 /// `build` is the Windows build number; `taskbar_al` is the `TaskbarAl` registry value.
 pub fn icons_left_aligned(build: Option<u32>, taskbar_al: Option<u32>) -> bool {
     is_windows_10(build) || taskbar_al == Some(0)
+}
+
+/// Which end of the taskbar the strip sits at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+}
+
+/// Resolves the configured placement: automatic keeps the strip clear of the icons, so it
+/// goes right on Windows 10 and with left-aligned icons, left otherwise.
+pub fn resolve_side(placement: Placement, windows_10: bool, left_aligned: bool) -> Side {
+    match placement {
+        Placement::Left => Side::Left,
+        Placement::Right => Side::Right,
+        Placement::Auto if windows_10 || left_aligned => Side::Right,
+        Placement::Auto => Side::Left,
+    }
 }
 
 /// Whether the Widgets button is present and enabled. Windows 10 has no Widgets button
@@ -290,8 +386,22 @@ pub fn taskbar_hwnd() -> Option<HWND> {
     unsafe { FindWindowW(w!("Shell_TrayWnd"), None) }.ok()
 }
 
-/// Queries the primary taskbar. `with_icons` runs the (slower) UI Automation lookup.
-pub fn query(with_icons: bool) -> Option<TaskbarInfo> {
+/// A taskbar wider than tall (at the bottom or top of the screen).
+pub fn is_horizontal(rect: Rect) -> bool {
+    rect.width() > rect.height()
+}
+
+/// Whether the app and tray edges are read: only for the right side of a horizontal taskbar.
+/// A vertical taskbar has no gap beside the tray, so the strip hides silently there.
+pub fn reads_edges(side: Side, rect: Rect) -> bool {
+    side == Side::Right && is_horizontal(rect)
+}
+
+/// Queries the primary taskbar. `with_icons` runs the (slower) UI Automation lookup of the
+/// Start button. The tray edge is read only when `placement` resolves to the right on a
+/// horizontal taskbar ([`reads_edges`]), and the app edge (UI Automation, see
+/// [`AppsEdgeCache`]) only then and when `with_apps` is set.
+pub fn query(with_icons: bool, with_apps: bool, placement: Placement) -> Option<TaskbarInfo> {
     let hwnd = taskbar_hwnd()?;
     let mut rect = RECT::default();
     // SAFETY: hwnd is a live window; rect is a valid out pointer.
@@ -314,6 +424,19 @@ pub fn query(with_icons: bool) -> Option<TaskbarInfo> {
     let state = unsafe { SHAppBarMessage(ABM_GETSTATE, &mut abd) } as u32;
     let build = windows_build();
     let overlap = rect.bottom.min(monitor.bottom) - rect.top.max(monitor.top);
+    let windows_10 = is_windows_10(build);
+    let left_aligned = icons_left_aligned(build, reg_dword(ADVANCED_KEY, "TaskbarAl"));
+    let side = resolve_side(placement, windows_10, left_aligned);
+    let (apps_right, tray_left) = if reads_edges(side, rect) {
+        (
+            with_apps
+                .then(|| edges::apps_right(hwnd, rect, windows_10))
+                .flatten(),
+            edges::tray_left(hwnd, rect),
+        )
+    } else {
+        (None, None)
+    };
     Some(TaskbarInfo {
         rect,
         monitor,
@@ -321,20 +444,33 @@ pub fn query(with_icons: bool) -> Option<TaskbarInfo> {
         dpi: unsafe { GetDpiForWindow(hwnd) }.max(96),
         autohide: state & ABS_AUTOHIDE != 0,
         visible: overlap > 4,
-        left_aligned: icons_left_aligned(build, reg_dword(ADVANCED_KEY, "TaskbarAl")),
-        windows_10: is_windows_10(build),
+        left_aligned,
+        windows_10,
         widgets_button_on: widgets_button_on(build, reg_dword(ADVANCED_KEY, "TaskbarDa")),
         icons_left: if with_icons {
             start_button_left(hwnd)
         } else {
             None
         },
+        apps_right,
+        tray_left,
+        side,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_side_table() {
+        use Placement::*;
+        assert_eq!(resolve_side(Auto, true, false), Side::Right);
+        assert_eq!(resolve_side(Auto, false, true), Side::Right);
+        assert_eq!(resolve_side(Auto, false, false), Side::Left);
+        assert_eq!(resolve_side(Left, true, true), Side::Left);
+        assert_eq!(resolve_side(Right, false, false), Side::Right);
+    }
 
     fn info(icons_left: Option<i32>) -> TaskbarInfo {
         TaskbarInfo {
@@ -357,7 +493,138 @@ mod tests {
             windows_10: false,
             widgets_button_on: false,
             icons_left,
+            apps_right: None,
+            tray_left: None,
+            side: Side::Left,
         }
+    }
+
+    fn right_info(apps_right: Option<i32>, tray_left: Option<i32>) -> TaskbarInfo {
+        TaskbarInfo {
+            apps_right,
+            tray_left,
+            ..info(None)
+        }
+    }
+
+    #[test]
+    fn right_gap_is_space_between_apps_and_tray() {
+        let i = right_info(Some(900), Some(1600));
+        assert_eq!(right_gap_width(&i, 8), 684);
+    }
+
+    #[test]
+    fn right_gap_is_zero_when_an_edge_is_missing() {
+        assert_eq!(right_gap_width(&right_info(None, Some(1600)), 8), 0);
+        assert_eq!(right_gap_width(&right_info(Some(900), None), 8), 0);
+        assert_eq!(right_gap_width(&right_info(None, None), 8), 0);
+    }
+
+    #[test]
+    fn right_gap_is_zero_when_crowded() {
+        let i = right_info(Some(1595), Some(1600));
+        assert_eq!(right_gap_width(&i, 8), 0);
+    }
+
+    #[test]
+    fn right_gap_scales_margin_with_dpi() {
+        use crate::ui::app::MARGIN_DIP;
+        use crate::ui::render::to_px;
+        let margin = to_px(MARGIN_DIP, 144);
+        assert_eq!(margin, 12);
+        let i = right_info(Some(900), Some(1600));
+        assert_eq!(right_gap_width(&i, margin), 700 - 2 * margin);
+        assert_eq!(right_gap_width(&i, margin), 676);
+    }
+
+    #[test]
+    fn edges_are_read_only_on_the_right_of_a_horizontal_taskbar() {
+        let bottom = info(None).rect;
+        let vertical = Rect {
+            left: 1872,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(is_horizontal(bottom));
+        assert!(!is_horizontal(vertical));
+        assert!(reads_edges(Side::Right, bottom));
+        assert!(!reads_edges(Side::Right, vertical));
+        assert!(!reads_edges(Side::Left, bottom));
+        assert!(!reads_edges(Side::Left, vertical));
+    }
+
+    /// Ticks until the cache asks for a read again.
+    fn ticks_to_lookup(c: &mut AppsEdgeCache) -> u32 {
+        let mut n = 0;
+        while !c.needs_lookup() {
+            c.tick();
+            n += 1;
+            assert!(n <= 100, "never asks again");
+        }
+        n
+    }
+
+    #[test]
+    fn apps_edge_failures_back_off_like_the_icons() {
+        let mut c = AppsEdgeCache::default();
+        assert!(c.needs_lookup());
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            c.on_lookup(None);
+            // A failed read is never cached as a guess.
+            assert_eq!(c.value(), None);
+            waits.push(ticks_to_lookup(&mut c));
+        }
+        assert_eq!(waits, [10, 20, 30, 30, 30]);
+        // A success ends the back-off.
+        c.on_lookup(Some(1159));
+        assert_eq!(c.value(), Some(1159));
+        assert_eq!(ticks_to_lookup(&mut c), ICON_PERIOD_TICKS);
+    }
+
+    #[test]
+    fn apps_edge_dirty_mark_waits_out_the_back_off_but_reset_does_not() {
+        let mut c = AppsEdgeCache::default();
+        c.on_lookup(None);
+        // Foreground changes do not retry a failing read on every switch.
+        c.invalidate();
+        assert!(!c.needs_lookup());
+        // Explorer, display or settings changed: read right away and drop the back-off.
+        c.reset();
+        assert!(c.needs_lookup());
+        c.on_lookup(None);
+        assert_eq!(ticks_to_lookup(&mut c), 10);
+    }
+
+    #[test]
+    fn apps_edge_refreshes_on_the_icon_cadence() {
+        let mut c = AppsEdgeCache::default();
+        c.on_lookup(Some(1159));
+        for _ in 1..ICON_PERIOD_TICKS {
+            c.tick();
+            assert!(!c.needs_lookup());
+        }
+        c.tick();
+        assert!(c.needs_lookup());
+        c.on_lookup(Some(1203));
+        assert!(!c.needs_lookup());
+        assert_eq!(c.value(), Some(1203));
+    }
+
+    #[test]
+    fn apps_edge_invalidate_forces_a_read_and_a_failure_drops_the_value() {
+        let mut c = AppsEdgeCache::default();
+        c.on_lookup(Some(1159));
+        c.invalidate();
+        assert!(c.needs_lookup());
+        c.on_lookup(None);
+        assert_eq!(c.value(), None);
+    }
+
+    #[test]
+    fn strip_left_is_flush_with_tray() {
+        assert_eq!(right_strip_left(1600, 8, 300), 1292);
     }
 
     #[test]
@@ -499,7 +766,7 @@ mod live {
                 windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
             );
         }
-        let info = super::query(true).expect("taskbar");
+        let info = super::query(true, true, crate::config::Placement::Auto).expect("taskbar");
         println!("{info:?} available={}", super::available_width(&info, 8));
         assert!(info.rect.width() > 0 && info.dpi >= 96);
     }

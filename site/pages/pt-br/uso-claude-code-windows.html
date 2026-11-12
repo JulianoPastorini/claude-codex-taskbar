@@ -37,7 +37,7 @@
   <ol class="steps">
     <li>Confira se o Claude Code está logado no seu usuário do Windows: rode <code>claude</code> uma vez e conclua o <code>/login</code>.</li>
     <li>Baixe o zip da <a href="{{release_url}}">versão mais recente do CCT</a>, extraia o <code>claude-codex-taskbar.exe</code> para uma pasta fixa e execute. Sem instalador e sem precisar de administrador.</li>
-    <li>Desligue o botão de Widgets do Windows (<em>Configurações → Personalização → Barra de tarefas → Widgets</em>) e mantenha os ícones centralizados: a faixa aparece no canto esquerdo.</li>
+    <li>No Windows 11 com ícones centralizados, desligue o botão de Widgets do Windows (<em>Configurações → Personalização → Barra de tarefas → Widgets</em>): a faixa aparece no canto esquerdo. No Windows 10, ou com ícones alinhados à esquerda, ela fica ao lado da bandeja do sistema.</li>
     <li>Clique direito na faixa → <strong>Iniciar com o Windows</strong>, para ela estar lá a cada reinício.</li>
   </ol>
   <p>O CCT lê, só para leitura, o login que o Claude Code já salvou. Não precisa de chave de API nem de senha, e não envia nada a lugar nenhum além da consulta de uso para a Anthropic.</p>
@@ -46,6 +46,7 @@
   <ul>
     <li><strong>O rótulo</strong> (por exemplo <code>P</code> ou <code>W</code>) diz de qual conta são os números. Defina em Configurações.</li>
     <li><strong>Dois medidores</strong> mostram o % usado das janelas de 5 horas e semanal. A barra usa a cor do Claude, fica âmbar a partir de 75% e vermelha a partir de 90%.</li>
+    <li><strong>O tick</strong> em cada barra mostra o tempo: ele marca quanto da janela já passou, anda da esquerda para a direita e chega ao fim da barra no reset. Preenchimento antes do tick: a cota dura até o reset. Preenchimento depois do tick: você está gastando mais rápido que o relógio e pode bater o limite antes. Ele só aparece com leituras recentes e horário de reset conhecido.</li>
     <li><strong>Passe o mouse</strong> para ver os horários de reset no seu fuso, os percentuais semanais de Opus e Sonnet e um aviso quando o uso extra está ligado.</li>
     <li><strong><code>—</code> no lugar de um número</strong> significa que o CCT não conseguiu ler o limite (login expirado, serviço fora do ar). Ele nunca mostra um <code>0%</code> falso; a dica de ferramenta explica o motivo.</li>
     <li>Prefere ver o que <strong>sobra</strong>? Ligue “Mostrar restante em vez de usado” em Configurações: <code>38%</code> restante em vez de <code>62%</code> usado.</li>

@@ -37,7 +37,7 @@
   <ol class="steps">
     <li>Make sure Claude Code is logged in on your Windows user: run <code>claude</code> once and finish <code>/login</code>.</li>
     <li>Download the zip from the <a href="{{release_url}}">latest CCT release</a>, extract <code>claude-codex-taskbar.exe</code> to a permanent folder and run it. No installer and no admin rights.</li>
-    <li>Turn off the Windows Widgets button (<em>Settings → Personalization → Taskbar → Widgets</em>) and keep icons centered: the strip appears in the left corner.</li>
+    <li>On Windows 11 with centered icons, turn off the Windows Widgets button (<em>Settings → Personalization → Taskbar → Widgets</em>): the strip appears in the left corner. On Windows 10, or with left-aligned icons, it sits next to the system tray.</li>
     <li>Right-click the strip → <strong>Start with Windows</strong> so it is there after every reboot.</li>
   </ol>
   <p>CCT reads the login Claude Code already saved, read-only. It needs no API key and no password, and it sends nothing anywhere except the usage request to Anthropic.</p>
@@ -46,6 +46,7 @@
   <ul>
     <li><strong>The label</strong> (for example <code>P</code> or <code>W</code>) tells you which account the numbers belong to. Set it in Settings.</li>
     <li><strong>Two gauges</strong> show the 5-hour and weekly % used. The bar uses the Claude color, turns amber from 75% and red from 90%.</li>
+    <li><strong>The tick</strong> on each bar shows the time: it marks how much of the window has passed, moves left to right, and reaches the end of the bar at the reset. Fill behind the tick means the quota lasts until the reset; fill past the tick means you are using it faster than the clock and may hit the limit early. It shows only on fresh readings with a known reset time.</li>
     <li><strong>Hover</strong> for the reset times in your local time, the weekly Opus and Sonnet percentages, and a notice when extra usage is on.</li>
     <li><strong><code>—</code> instead of a number</strong> means CCT could not read the limit (expired login, endpoint down). It never shows a fake <code>0%</code>; the tooltip says why.</li>
     <li>Prefer to see what is <strong>left</strong>? Turn on “Show remaining” in Settings: <code>38%</code> left instead of <code>62%</code> used.</li>

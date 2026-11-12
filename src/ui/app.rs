@@ -3,10 +3,12 @@
 use super::frame::{FrameCache, FrameKey};
 use super::layout::{Layout, layout};
 use super::notifications::{Notice, Notifications};
+use super::placement::{PlacementWatch, outcome_of};
 use super::render::{GAP, Renderer, SEP_W, to_px};
 use super::strip;
 use super::taskbar::{
-    self, IconCache, TaskbarInfo, available_width, hides_for_fullscreen, is_fullscreen,
+    self, AppsEdgeCache, IconCache, Side, TaskbarInfo, available_width, hides_for_fullscreen,
+    is_fullscreen, right_gap_width, right_strip_left,
 };
 use super::view::{ItemView, TaskbarHints, build_items, tooltip_text};
 use crate::config::{self, Config};
@@ -26,6 +28,7 @@ use crate::timeutil::now_unix;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
@@ -39,8 +42,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::HSTRING;
 
-/// Strip offset from the taskbar's left edge, in DIPs.
-const MARGIN_DIP: f32 = 8.0;
+/// Gap between the strip and what it sits next to, in DIPs: the taskbar's left edge on the
+/// left side; the app buttons and the tray on the right side (#10).
+pub(crate) const MARGIN_DIP: f32 = 8.0;
 
 mod notifications;
 
@@ -56,6 +60,12 @@ pub struct App {
     renderer: Renderer,
     pub(super) taskbar: Option<TaskbarInfo>,
     icons: IconCache,
+    /// Right edge of the app buttons, for the right side (#10).
+    apps_edge: AppsEdgeCache,
+    /// Settled right-side placement failures, for one notice per run (#10).
+    placement: PlacementWatch,
+    /// Monotonic clock for the placement watch.
+    started: Instant,
     items: Vec<ItemView>,
     layout: Option<Layout>,
     frame: FrameCache,
@@ -142,6 +152,9 @@ impl App {
             renderer: Renderer::new()?,
             taskbar: None,
             icons: IconCache::default(),
+            apps_edge: AppsEdgeCache::default(),
+            placement: PlacementWatch::default(),
+            started: Instant::now(),
             items: Vec::new(),
             layout: None,
             frame: FrameCache::default(),
@@ -274,13 +287,26 @@ impl App {
         self.light = light_theme();
     }
 
-    /// Asks for a fresh UI Automation icon lookup (icons may have moved).
+    /// Asks for a fresh UI Automation icon lookup (icons may have moved). Cheap: only marks
+    /// the caches dirty.
     pub fn invalidate_icons(&mut self) {
         self.icons.invalidate();
+        self.apps_edge.invalidate();
+    }
+
+    /// Asks for a fresh read of the app buttons' edge only (an app window came or went).
+    pub fn invalidate_apps_edge(&mut self) {
+        self.apps_edge.invalidate();
+    }
+
+    /// The taskbar itself changed: read the app edge on the next render, without back-off.
+    pub fn reset_apps_edge(&mut self) {
+        self.apps_edge.reset();
     }
 
     pub fn tick_icons(&mut self) {
         self.icons.tick();
+        self.apps_edge.tick();
     }
 
     /// Statuses as of now: data older than the refresh cadence allows is not shown as current.
@@ -324,9 +350,49 @@ impl App {
         self.icons.needs_lookup()
     }
 
+    /// Whether the next taskbar query should read the app buttons' edge (right side only).
+    pub fn needs_apps_edge(&self) -> bool {
+        self.apps_edge.needs_lookup()
+    }
+
+    /// The placement notice still to be delivered while its failure is settled (#10):
+    /// `Some(true)` when it should also open Settings (the startup decision).
+    pub fn pending_placement_notice(&self) -> Option<bool> {
+        self.placement.pending_notice()
+    }
+
+    /// The placement notice has been delivered.
+    pub fn placement_notice_sent(&mut self) {
+        self.placement.notice_sent();
+    }
+
+    /// Explorer restarted: the placement watch starts a new grace period.
+    pub fn restart_placement(&mut self) {
+        self.placement.restart(self.started.elapsed().as_secs());
+    }
+
+    /// Whether the strip has settled as unable to sit next to the tray.
+    pub fn placement_failed(&self) -> bool {
+        self.placement.settled_failure()
+    }
+
+    /// Whether the strip stays hidden at startup because a left-side strip has no room next
+    /// to left-aligned icons (Settings then explains why).
+    pub fn left_side_blocked(&self) -> bool {
+        self.taskbar
+            .as_ref()
+            .is_some_and(|t| t.side == Side::Left && t.left_aligned)
+    }
+
     /// Recomputes position and layout from a fresh taskbar query, then paints or hides.
     /// The query runs outside the `App` borrow because UI Automation can pump messages.
-    pub fn render(&mut self, hwnd: HWND, info: Option<TaskbarInfo>, looked_up_icons: bool) {
+    pub fn render(
+        &mut self,
+        hwnd: HWND,
+        info: Option<TaskbarInfo>,
+        looked_up_icons: bool,
+        looked_up_apps: bool,
+    ) {
         let Some(mut info) = info else {
             strip::hide(hwnd, self);
             return;
@@ -335,6 +401,13 @@ impl App {
             self.icons.on_lookup(info.icons_left);
         }
         info.icons_left = self.icons.value();
+        let right = info.side == Side::Right;
+        if right {
+            if looked_up_apps {
+                self.apps_edge.on_lookup(info.apps_right);
+            }
+            info.apps_right = self.apps_edge.value();
+        }
         let dpi = info.dpi;
         let now = now_unix();
         let (claude, codex) = self.displayed_statuses();
@@ -352,7 +425,12 @@ impl App {
             items: self.items.clone(),
             taskbar: info.rect,
             dpi,
-            available: available_width(&info, margin),
+            available: if right {
+                right_gap_width(&info, margin)
+            } else {
+                available_width(&info, margin)
+            },
+            tray_left: info.tray_left,
             light: self.light,
         };
         let covered = !info.visible || foreground_is_fullscreen(info.monitor);
@@ -376,20 +454,43 @@ impl App {
             to_px(SEP_W, dpi),
             self.renderer.ellipsis_px(dpi),
         );
-        if covered || l.width == 0 {
-            strip::hide(hwnd, self);
-        } else {
-            let pos = (info.rect.left + margin, info.rect.top);
-            let size = (l.width, info.rect.height());
-            let painted =
-                self.renderer
-                    .paint(hwnd, pos, size, dpi, &self.items, &metrics, &l, self.light);
-            match hides_strip(painted.is_err()) {
-                StripAction::Show => {
-                    self.frame.painted(key);
-                    strip::show(hwnd, self);
+        // Covered states hide as today and say nothing about the placement. An empty strip
+        // (every item turned off) has nothing to place.
+        if !covered
+            && !self.items.is_empty()
+            && let Some(outcome) = outcome_of(info.side, &info, l.width)
+        {
+            self.placement
+                .observe(outcome, self.started.elapsed().as_secs());
+        }
+        // Right side: flush with the tray; a non-zero width means both edges were read.
+        let left = match (right, info.tray_left) {
+            (false, _) => Some(info.rect.left + margin),
+            (true, Some(tray_left)) => Some(right_strip_left(tray_left, margin, l.width)),
+            (true, None) => None,
+        };
+        match left.filter(|_| !covered && l.width != 0) {
+            None => strip::hide(hwnd, self),
+            Some(left) => {
+                let pos = (left, info.rect.top);
+                let size = (l.width, info.rect.height());
+                let painted = self.renderer.paint(
+                    hwnd,
+                    pos,
+                    size,
+                    dpi,
+                    &self.items,
+                    &metrics,
+                    &l,
+                    self.light,
+                );
+                match hides_strip(painted.is_err()) {
+                    StripAction::Show => {
+                        self.frame.painted(key);
+                        strip::show(hwnd, self);
+                    }
+                    StripAction::Hide => strip::hide(hwnd, self),
                 }
-                StripAction::Hide => strip::hide(hwnd, self),
             }
         }
         self.layout = Some(l);
@@ -413,6 +514,7 @@ impl App {
                 left_aligned: t.left_aligned,
                 widgets_button_on: t.widgets_button_on,
                 windows_10: t.windows_10,
+                side: t.side,
             },
             None => TaskbarHints::default(),
         }
