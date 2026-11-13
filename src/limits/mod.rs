@@ -185,10 +185,11 @@ mod tests {
             let reset = NOW + window_len;
             let cases = [
                 ("start", 0.0, 0.0, None),
-                ("guard", 0.05, 0.01, None),
-                ("below pace", 0.5, 0.2, Some(0.4)),
-                ("above pace", 0.3, 0.6, Some(2.0)),
-                ("end", 0.99, 99.0, Some(100.0)),
+                ("guard after reset", 0.01, 5.0, None),
+                ("below pace", 0.5, 20.0, Some(0.4)),
+                ("on pace", 0.5, 50.0, Some(1.0)),
+                ("above pace", 0.25, 50.0, Some(2.0)),
+                ("near end", 0.75, 75.0, Some(1.0)),
             ];
             for (name, elapsed, used, expected) in cases {
                 let now = NOW + (window_len as f64 * elapsed) as i64;
@@ -205,6 +206,15 @@ mod tests {
         for (reset, used) in [(None, 20.0), (Some(NOW - 1), 20.0), (Some(NOW + FIVE_HOUR_SECS), 0.0), (Some(NOW + FIVE_HOUR_SECS), -1.0)] {
             assert_eq!(pace_ratio(reset, FIVE_HOUR_SECS, used, NOW), None);
         }
+        assert_eq!(
+            pace_ratio(
+                Some(NOW + FIVE_HOUR_SECS),
+                FIVE_HOUR_SECS,
+                100.0,
+                NOW + FIVE_HOUR_SECS / 2
+            ),
+            Some(2.0)
+        );
     }
 
     #[test]

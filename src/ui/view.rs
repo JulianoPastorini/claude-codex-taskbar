@@ -630,24 +630,21 @@ mod tests {
     fn slow_and_stale_tooltips_do_not_show_exhaustion_projection() {
         const NOW: i64 = 1_800_000_000;
         let reset = NOW + FIVE_HOUR_SECS;
-        let now = NOW + FIVE_HOUR_SECS / 2;
+        let now = NOW + FIVE_HOUR_SECS * 3 / 10;
         let usage = ProviderUsage {
             five_hour: Some(WindowUsage {
-                used_pct: 20.0,
+                used_pct: 60.0,
                 resets_at: Some(reset),
             }),
             ..Default::default()
         };
-        let live = ProviderStatus::Ok {
-            usage: usage.clone(),
-            at: now,
-        };
         let stale = ProviderStatus::Stale {
-            usage,
+            usage: usage.clone(),
             at: now,
             err: FetchError::Network(String::new()),
         };
-        for status in [&live, &stale] {
+        let from_session = ProviderStatus::FromSession { usage, at: now };
+        for status in [&stale, &from_session] {
             let tip = tooltip_text(
                 Lang::En,
                 status,
@@ -657,18 +654,9 @@ mod tests {
                 now,
                 false,
             );
+            assert!(!tip.contains("pace:"), "{tip}");
             assert!(!tip.contains("~100%"), "{tip}");
         }
-        let live_tip = tooltip_text(
-            Lang::En,
-            &live,
-            &ProviderStatus::Disabled,
-            &[],
-            TaskbarHints::default(),
-            now,
-            false,
-        );
-        assert!(live_tip.contains("pace: 40%"), "{live_tip}");
     }
 
     use crate::config::Config;
